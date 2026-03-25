@@ -12,7 +12,6 @@ import torch
 
 import torch.distributed as dist
 from peft import set_peft_model_state_dict
-from decord import VideoReader
 from tqdm import tqdm
 import torch.nn.functional as F
 from .distributed.fsdp import shard_model
@@ -266,31 +265,34 @@ class WanAnimate:
 
         return img_pad
 
-    def prepare_source(self, src_pose_path, src_face_path, src_ref_path):
-        pose_video_reader = VideoReader(src_pose_path)
-        pose_len = len(pose_video_reader)
-        pose_idxs = list(range(pose_len))
-        cond_images = pose_video_reader.get_batch(pose_idxs).asnumpy()
+    def _read_video_all_frames(self, video_path):
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Failed to open video: {video_path}")
 
-        face_video_reader = VideoReader(src_face_path)
-        face_len = len(face_video_reader)
-        face_idxs = list(range(face_len))
-        face_images = face_video_reader.get_batch(face_idxs).asnumpy()
+        frames = []
+        while True:
+            success, frame = cap.read()
+            if not success:
+                break
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        cap.release()
+
+        if len(frames) == 0:
+            raise ValueError(f"No frames found in video: {video_path}")
+        return np.stack(frames, axis=0)
+
+    def prepare_source(self, src_pose_path, src_face_path, src_ref_path):
+        cond_images = self._read_video_all_frames(src_pose_path)
+        face_images = self._read_video_all_frames(src_face_path)
         height, width = cond_images[0].shape[:2]
         refer_images = cv2.imread(src_ref_path)[..., ::-1]
         refer_images = self.padding_resize(refer_images, height=height, width=width)
         return cond_images, face_images, refer_images
     
     def prepare_source_for_replace(self, src_bg_path, src_mask_path):
-        bg_video_reader = VideoReader(src_bg_path)
-        bg_len = len(bg_video_reader)
-        bg_idxs = list(range(bg_len))
-        bg_images = bg_video_reader.get_batch(bg_idxs).asnumpy()
-
-        mask_video_reader = VideoReader(src_mask_path)
-        mask_len = len(mask_video_reader)
-        mask_idxs = list(range(mask_len))
-        mask_images = mask_video_reader.get_batch(mask_idxs).asnumpy()
+        bg_images = self._read_video_all_frames(src_bg_path)
+        mask_images = self._read_video_all_frames(src_mask_path)
         mask_images = mask_images[:, :, :, 0] / 255
         return bg_images, mask_images
 
