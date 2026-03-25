@@ -11,11 +11,11 @@ from copy import deepcopy
 from functools import partial
 
 import numpy as np
+import cv2
 import torch
 import torch.cuda.amp as amp
 import torch.distributed as dist
 import torchvision.transforms.functional as TF
-from decord import VideoReader
 from PIL import Image
 from safetensors import safe_open
 from torchvision import transforms
@@ -312,9 +312,18 @@ class WanS2V:
         Returns:
             np.ndarray: A NumPy array of shape [n_frames, H, W, 3], representing the sampled video frames.
         """
-        vr = VideoReader(video_path)
-        original_fps = vr.get_avg_fps()
-        total_frames = len(vr)
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Failed to open video: {video_path}")
+
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        if original_fps <= 0:
+            original_fps = target_fps
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            raise ValueError(f"Invalid frame count for video: {video_path}")
 
         interval = max(1, round(original_fps / target_fps))
 
@@ -331,7 +340,19 @@ class WanS2V:
             else:
                 sampled_indices.append(indice)
 
-        return vr.get_batch(sampled_indices).asnumpy()
+        sampled_frames = []
+        for indice in sampled_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, indice)
+            success, frame = cap.read()
+            if not success:
+                continue
+            sampled_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        cap.release()
+
+        if len(sampled_frames) == 0:
+            raise ValueError(f"No frames could be sampled from video: {video_path}")
+
+        return np.stack(sampled_frames, axis=0)
 
     def load_pose_cond(self, pose_video, num_repeat, infer_frames, size):
         HEIGHT, WIDTH = size
