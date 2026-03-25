@@ -13,6 +13,13 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
+try:
+    import torch_npu
+    NPU_FLASH_ATTN_AVAILABLE = hasattr(torch_npu, 'npu_fusion_attention')
+except ModuleNotFoundError:
+    torch_npu = None
+    NPU_FLASH_ATTN_AVAILABLE = False
+
 import warnings
 
 __all__ = [
@@ -51,7 +58,7 @@ def flash_attention(
     """
     half_dtypes = (torch.float16, torch.bfloat16)
     assert dtype in half_dtypes
-    assert q.device.type == 'cuda' and q.size(-1) <= 256
+    assert q.device.type in ('cuda', 'npu') and q.size(-1) <= 256
 
     # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
@@ -91,7 +98,27 @@ def flash_attention(
         )
 
     # apply attention
-    if (version is None or version == 3) and FLASH_ATTN_3_AVAILABLE:
+    if q.device.type == 'npu':
+        assert NPU_FLASH_ATTN_AVAILABLE, (
+            'NPU flash attention is not available. '
+            'Please install torch_npu with npu_fusion_attention support.'
+        )
+        x = torch_npu.npu_fusion_attention(
+            q=q,
+            k=k,
+            v=v,
+            head_num=q.shape[-2],
+            input_layout='TND',
+            atten_mask=None,
+            scale=softmax_scale if softmax_scale is not None else q.size(-1) ** (-0.5),
+            keep_prob=1.0 - dropout_p,
+            pre_tockens=window_size[0],
+            next_tockens=window_size[1],
+            sparse_mode=0,
+            actual_seq_qlen=q_lens,
+            actual_seq_kvlen=k_lens,
+        )[0].unflatten(0, (b, lq))
+    elif (version is None or version == 3) and FLASH_ATTN_3_AVAILABLE:
         # Note: dropout_p, window_size are not supported in FA3 now.
         x = flash_attn_interface.flash_attn_varlen_func(
             q=q,
@@ -145,6 +172,22 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
+    if q.device.type == 'npu' and NPU_FLASH_ATTN_AVAILABLE:
+        return flash_attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype,
+            version=fa_version,
+        )
     if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
         return flash_attention(
             q=q,
