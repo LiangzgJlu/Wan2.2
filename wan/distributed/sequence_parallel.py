@@ -10,12 +10,25 @@ from .util import gather_forward, get_rank, get_world_size
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
     pad_size = target_len - seq_len
-    padding_tensor = torch.ones(
-        pad_size,
-        s1,
-        s2,
-        dtype=original_tensor.dtype,
-        device=original_tensor.device)
+    if original_tensor.is_complex():
+        # NOTE: Some backends (e.g. Ascend NPU) do not support creating
+        # complex tensors directly with torch.ones(..., dtype=complex*).
+        # Build 1+0j from real tensors instead.
+        real_padding = torch.ones(
+            pad_size,
+            s1,
+            s2,
+            dtype=original_tensor.real.dtype,
+            device=original_tensor.device)
+        padding_tensor = torch.complex(real_padding,
+                                       torch.zeros_like(real_padding))
+    else:
+        padding_tensor = torch.ones(
+            pad_size,
+            s1,
+            s2,
+            dtype=original_tensor.dtype,
+            device=original_tensor.device)
     padded_tensor = torch.cat([original_tensor, padding_tensor], dim=0)
     return padded_tensor
 
